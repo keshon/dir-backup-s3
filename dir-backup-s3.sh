@@ -62,18 +62,17 @@ exit 1
 ## POST message to webhook
 _post() {
     local step="$1"
-    local title="$2"
-    local message="$3"
-    local backupMode="$4"
-    local webhookURL="$5"
-    local pastRange="$6"
-    local pathS3="$7"
-    local serverName="$8"
-    local report="$9"
-    
-    curl -X POST $webhookURL\
-            -H "Content-Type: application/json"\
-            -d '{"step": "'$step'", "title": "'$title'", "message": "'$message'", "backup_mode":"'$backupMode'", "webhook_url": "'$webhookURL'", "past_range": "'$pastRange'", "path_s3": "'$pathS3'", "server_name":"'$serverName'", "report": "'$report'"}'
+    local backupMode="$2"
+    local webhookURL="$3"
+    local todayDate="$4"
+    local pathS3="$5"
+    local serverName="$6"
+    local report="$7"
+
+    local payload="{\"step\":\"$step\",\"backup_mode\":\"$backupMode\",\"webhook_url\":\"$webhookURL\",\"today_date\":\"$todayDate\",\"path_s3\":\"$pathS3\",\"server_name\":\"$serverName\",\"report\":\"$report\"}"
+    curl -X POST "$webhookURL" \
+            -H "Content-Type: application/json" \
+            --data $payload
 }
 
 ## Echo message to CLI
@@ -165,19 +164,6 @@ fi
 
 #--------------------------------
 
-echo ""
-echo "Starting.."
-
-# Inform
-message="backupMode: $backupMode\nwebhookURL: $webhookURL\npastRange: $pastRange\npathS3: $pathS3\nserverName: $serverName\n"
-if [[ $webhookURL != "" ]]; then
-    _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
-else
-    _log "$title" "$message"
-    echo "Dirs list:"
-    printf '%s\n' "${backupDirsList[@]}"
-fi
-
 # Set dates
 ## Only store 0 days of backups on the server.
 ## Changed to 0 days to not fill the server with unneccessary backups
@@ -194,6 +180,22 @@ todayDate=`date --date="today" +%y-%m-%d`
 
 ## Finally, setup the today specific variables.
 tempCurrentDir=$tempDir/$todayDate
+
+echo ""
+echo "Starting.."
+
+# Inform
+step="start"
+title="Starting backup process for $serverName"
+message="backup mode: $backupMode \nwebhook URL: $webhookURL \npast range: $pastRange \npath to S3: $pathS3 \nserver name: $serverName"
+if [[ $webhookURL != "" ]]; then
+    # replace spaces to '--' to pass sentences as values 
+    _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
+else
+    _log "$title" "$message"
+    echo "Dirs list:"
+    printf '%s\n' "${backupDirsList[@]}"
+fi
 
 if [[ $backupMode == "archive" ]]; then
     # Archive dirs
@@ -216,11 +218,11 @@ if [[ $backupMode == "archive" ]]; then
     done
 
     ## Alert that backup complete, starting sync
+    step="put_archive"
     title="$serverName Backup complete, starting sync $todayDate"
     message="Backup script has finished and starting sync to S3 now."
-
     if [[ $webhookURL != "" ]]; then
-        _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
+        _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
     else
         _log "$title" "$message"
     fi
@@ -231,10 +233,11 @@ if [[ $backupMode == "archive" ]]; then
     echo "Syncing $todayDate to $pathS3$todayDate/"
     s3cmd put --recursive $tempCurrentDir $pathS3
     if [ $? -ne 0 ]; then
+        step="put_failed"
         subject="s3cmd put failed on $serverName"
         message="s3cmd put of $tempCurrentDir failed. You should check things out immediately."
         if [[ $webhookURL != "" ]]; then
-            _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
+            _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
         else
             _log "$title" "$message"
         fi
@@ -253,13 +256,26 @@ if [[ $backupMode == "sync" ]]; then
     # Send to S3 (sync)
     echo ""
     echo "Syncing $todayDate to $pathS3$todayDate/"
+    
+    ## Alert that backup complete, starting sync
+    step="sync_dir"
+    title="$serverName - starting to sync $todayDate"
+    message="Starting to sync to S3 now."
+
+    if [[ $webhookURL != "" ]]; then
+        _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
+    else
+        _log "$title" "$message"
+    fi
+    
     for i in "${backupDirsList[@]}"; do
         s3cmd sync $i $pathS3$todayDate/
         if [ $? -ne 0 ]; then
+            step="sync_failed"
             subject="s3cmd sync failed on $serverName"
             message="s3cmd sync of $tempCurrentDir failed. You should check things out immediately."
             if [[ $webhookURL != "" ]]; then
-                _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
+                _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
             else
                 _log "$title" "$message"
             fi
@@ -277,10 +293,11 @@ else
     echo "No need to remove backup on the 1st"
 fi
 
+step="done"
 subject="$serverName sync to S3 Complete - $todayDate"
 message="$todayDate sync has now completed."
 if [[ $webhookURL != "" ]]; then
-    _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
+    _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
 else
     _log "$title" "$message"
 fi
@@ -292,11 +309,12 @@ s3cmd ls $pathS3$todayDate/
 exec 1>&-
 exec 2>&-
 
+step="report"
 subject="S3 sync report of $serverName: $todayDate"
 message="Detail report is located at $tempDir/s3report.txt"
 if [[ $webhookURL != "" ]]; then
     report=$(s3cmd du -H $pathS3$todayDate)
-    _post "$step" "$title" "$message" "$backupMode" "$webhookURL" "$pastRange" "$pathS3" "$serverName" "$report"
+    _post $step $backupMode $webhookURL "$todayDate" $pathS3 $serverName "${report// /__}"
 else
     _log "$title" "$message"
 fi
