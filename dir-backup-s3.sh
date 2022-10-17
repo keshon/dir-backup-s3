@@ -199,6 +199,9 @@ fi
 
 if [[ $backupMode == "archive" ]]; then
     # Archive dirs
+	## Create s3backups dir
+	mkdir -m 777 tmp/s3backups
+	
     ## Check we can write to the backups directory
     isDirWritable $tempDir
 
